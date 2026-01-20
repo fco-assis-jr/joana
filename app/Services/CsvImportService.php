@@ -13,10 +13,73 @@ class CsvImportService
 {
     protected $importDate;
     protected $importLog;
+    protected $tableColumns = [];
+    protected $csvHeaderMap = [];
 
     public function __construct()
     {
         $this->importDate = Carbon::now();
+        $this->loadTableColumns();
+    }
+
+    /**
+     * Load Oracle table columns
+     */
+    protected function loadTableColumns(): void
+    {
+        try {
+            // Get columns from Oracle table
+            $columns = DB::connection('oracle')
+                ->select("SELECT COLUMN_NAME FROM USER_TAB_COLUMNS WHERE TABLE_NAME = 'JOANA_TEMP' ORDER BY COLUMN_ID");
+
+            foreach ($columns as $column) {
+                $this->tableColumns[] = strtolower($column->column_name);
+            }
+
+            Log::info("Oracle table columns loaded", ['columns' => $this->tableColumns]);
+        } catch (Exception $e) {
+            Log::error("Error loading table columns: " . $e->getMessage());
+            // Fallback to hardcoded columns if query fails
+            $this->tableColumns = [
+                'uf', 'chave', 'numero', 'serie', 'emissao', 'cnpj_emissor',
+                'ie_emissor', 'razao_social', 'tipo', 'valor', 'vl_bc',
+                'vl_icms', 'vl_icms_st', 'vl_pis', 'vl_cofins', 'rejeitada', 'dtimportacao'
+            ];
+        }
+    }
+
+    /**
+     * Normalize column name (convert spaces to underscores, lowercase)
+     */
+    protected function normalizeColumnName(string $name): string
+    {
+        // Remove quotes, trim, convert to lowercase, replace spaces with underscore
+        $normalized = strtolower(trim(str_replace(["'", '"'], '', $name)));
+        $normalized = str_replace(' ', '_', $normalized);
+
+        return $normalized;
+    }
+
+    /**
+     * Map CSV header to Oracle columns
+     */
+    protected function mapCsvHeader(array $header): void
+    {
+        $this->csvHeaderMap = [];
+
+        foreach ($header as $index => $columnName) {
+            $normalized = $this->normalizeColumnName($columnName);
+
+            // Check if this column exists in Oracle table
+            if (in_array($normalized, $this->tableColumns)) {
+                $this->csvHeaderMap[$index] = $normalized;
+                Log::info("CSV column mapped", ['csv' => $columnName, 'oracle' => $normalized, 'index' => $index]);
+            } else {
+                Log::info("CSV column skipped (not in Oracle table)", ['csv' => $columnName, 'normalized' => $normalized]);
+            }
+        }
+
+        Log::info("CSV header mapping complete", ['total_mapped' => count($this->csvHeaderMap)]);
     }
 
     /**
@@ -49,6 +112,13 @@ class CsvImportService
                 throw new Exception("Arquivo CSV inválido");
             }
 
+            // Map CSV header to Oracle columns
+            $this->mapCsvHeader($header);
+
+            if (empty($this->csvHeaderMap)) {
+                throw new Exception("Nenhuma coluna do CSV corresponde às colunas da tabela Oracle");
+            }
+
             $totalRows = 0;
             $importedRows = 0;
             $cnpjsProcessed = [];
@@ -58,15 +128,14 @@ class CsvImportService
             while (($row = fgetcsv($handle, 0, ';')) !== false) {
                 $totalRows++;
 
-                // Parse row data
-                $data = $this->parseRow($row);
+                // Parse row data dynamically based on header mapping
+                $data = $this->parseRowDynamic($row);
 
                 if ($data) {
-                    $cnpjEmissor = $data['cnpj_emissor'];
+                    // Check for CNPJ to handle deletion of old records
+                    $cnpjEmissor = $data['cnpj_emissor'] ?? null;
 
-                    // Check if we need to delete old records for this CNPJ
-                    // Delete ALL records for this CNPJ, regardless of date
-                    if (!in_array($cnpjEmissor, $cnpjsProcessed)) {
+                    if ($cnpjEmissor && !in_array($cnpjEmissor, $cnpjsProcessed)) {
                         if (JoanaTemp::hasRecords($cnpjEmissor)) {
                             $deletedCount = JoanaTemp::deleteOldRecords($cnpjEmissor);
                             Log::info("Deleted {$deletedCount} old records for CNPJ: {$cnpjEmissor}");
@@ -129,7 +198,75 @@ class CsvImportService
     }
 
     /**
-     * Parse a CSV row into database format
+     * Parse a CSV row dynamically based on header mapping
+     */
+    protected function parseRowDynamic(array $row): ?array
+    {
+        try {
+            $data = [];
+
+            // Map each CSV column to Oracle column based on header mapping
+            foreach ($this->csvHeaderMap as $csvIndex => $oracleColumn) {
+                $value = $row[$csvIndex] ?? null;
+
+                // Apply data type conversions based on column name
+                $data[$oracleColumn] = $this->convertValue($oracleColumn, $value);
+            }
+
+            // Always add dtimportacao if not present
+            if (!isset($data['dtimportacao'])) {
+                $data['dtimportacao'] = $this->importDate;
+            }
+
+            // Set default values for required fields if not mapped
+            if (!isset($data['rejeitada'])) {
+                $data['rejeitada'] = 'N';
+            }
+
+            return $data;
+
+        } catch (Exception $e) {
+            Log::warning("Error parsing row: " . $e->getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Convert value based on column type
+     */
+    protected function convertValue(string $columnName, ?string $value)
+    {
+        // Handle null/empty values
+        if (empty($value) || $value === 'null' || $value === '') {
+            return null;
+        }
+
+        // Date columns
+        if (in_array($columnName, ['emissao', 'dtimportacao'])) {
+            return $this->parseDate($value);
+        }
+
+        // Integer columns
+        if (in_array($columnName, ['numero', 'serie'])) {
+            return $this->cleanNumber($value);
+        }
+
+        // Decimal columns
+        if (in_array($columnName, ['valor', 'vl_bc', 'vl_icms', 'vl_icms_st', 'vl_pis', 'vl_cofins'])) {
+            return $this->cleanDecimal($value);
+        }
+
+        // String columns (clean quotes)
+        if (in_array($columnName, ['chave', 'cnpj_emissor', 'ie_emissor'])) {
+            return $this->cleanString($value);
+        }
+
+        // Default: return as is (trimmed)
+        return trim($value);
+    }
+
+    /**
+     * Parse a CSV row into database format (DEPRECATED - kept for reference)
      */
     protected function parseRow(array $row): ?array
     {
