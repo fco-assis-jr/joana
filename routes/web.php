@@ -4,13 +4,13 @@ use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\CsvImportController;
 
 Route::get('/', function () {
-    return redirect('/csv-import');
+    return redirect('/joana');
 });
 
-// CSV Import Routes
-Route::prefix('csv-import')->group(function () {
-    Route::get('/', [CsvImportController::class, 'index'])->name('csv-import.index');
-    Route::post('/upload', [CsvImportController::class, 'upload'])->name('csv-import.upload');
-    Route::get('/status/{id}', [CsvImportController::class, 'status'])->name('csv-import.status');
-    Route::get('/recent', [CsvImportController::class, 'recent'])->name('csv-import.recent');
+// Joana Import Routes
+Route::prefix('joana')->group(function () {
+    Route::get('/', [CsvImportController::class, 'index'])->name('joana.index');
+    Route::post('/upload', [CsvImportController::class, 'upload'])->name('joana.upload');
+    Route::get('/status/{id}', [CsvImportController::class, 'status'])->name('joana.status');
+    Route::get('/recent', [CsvImportController::class, 'recent'])->name('joana.recent');
 });

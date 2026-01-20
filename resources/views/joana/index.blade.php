@@ -764,7 +764,7 @@
                     }
                 }, 200);
 
-                const response = await fetch('/csv-import/upload', {
+                const response = await fetch('/joana/upload', {
                     method: 'POST',
                     headers: {
                         'X-CSRF-TOKEN': csrfToken
@@ -820,7 +820,7 @@
 
         async function refreshImports() {
             try {
-                const response = await fetch('/csv-import/recent');
+                const response = await fetch('/joana/recent');
                 const result = await response.json();
 
                 if (result.success) {
@@ -1011,7 +1011,7 @@
                 pollCount++;
 
                 try {
-                    const response = await fetch(`/csv-import/status/${importLogId}`);
+                    const response = await fetch(`/joana/status/${importLogId}`);
                     const result = await response.json();
 
                     if (result.success) {

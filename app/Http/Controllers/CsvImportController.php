@@ -18,7 +18,7 @@ class CsvImportController extends Controller
             ->take(20)
             ->get();
 
-        return view('csv-import.index', compact('recentImports'));
+        return view('joana.index', compact('recentImports'));
     }
 
     /**
