@@ -34,12 +34,12 @@ class CsvImportController extends Controller
 
         $validator = Validator::make($request->all(), [
             'files' => 'required|array|max:11',
-            'files.*' => 'required|file|mimes:csv,txt|max:51200', // Max 50MB per file
+            'files.*' => 'required|file|mimes:csv,txt|max:102400', // Max 100MB per file
         ], [
             'files.required' => 'Por favor, selecione pelo menos um arquivo',
             'files.max' => 'Você pode enviar no máximo 11 arquivos por vez',
             'files.*.mimes' => 'Apenas arquivos CSV são permitidos',
-            'files.*.max' => 'O tamanho máximo por arquivo é 50MB',
+            'files.*.max' => 'O tamanho máximo por arquivo é 100MB',
         ]);
 
         if ($validator->fails()) {

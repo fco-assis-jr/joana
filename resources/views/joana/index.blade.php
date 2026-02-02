@@ -743,79 +743,116 @@
                 return;
             }
 
-            const formData = new FormData();
-            selectedFiles.forEach(file => {
-                formData.append('files[]', file);
-            });
-
             // Hide file list and show progress
             document.getElementById('fileList').style.display = 'none';
             showProgress();
 
             const totalFiles = selectedFiles.length;
-            updateProgress(10, 'Enviando arquivos...', 0, totalFiles);
+            let successCount = 0;
+            let errorCount = 0;
+            const allUploadedFiles = [];
+            const allErrors = [];
 
-            try {
-                // Simulate progress during upload
-                const progressInterval = setInterval(() => {
-                    const currentProgress = parseFloat(document.getElementById('progressBarFill').style.width);
-                    if (currentProgress < 70) {
-                        updateProgress(currentProgress + 5, 'Enviando...', 0, totalFiles);
+            // Upload files one by one to avoid 413 error when total size > 100MB
+            for (let i = 0; i < selectedFiles.length; i++) {
+                const file = selectedFiles[i];
+                const currentFile = i + 1;
+
+                try {
+                    updateProgress(
+                        Math.round(((i) / totalFiles) * 100),
+                        `Enviando arquivo ${currentFile} de ${totalFiles}: ${file.name}...`,
+                        i,
+                        totalFiles
+                    );
+
+                    const formData = new FormData();
+                    formData.append('files[]', file);
+
+                    const response = await fetch('/joana/upload', {
+                        method: 'POST',
+                        headers: {
+                            'X-CSRF-TOKEN': csrfToken
+                        },
+                        body: formData
+                    });
+
+                    // Check if response is OK
+                    if (!response.ok) {
+                        let errorMessage = 'Erro ao enviar arquivo';
+
+                        if (response.status === 413) {
+                            errorMessage = `Arquivo muito grande! ${file.name} excede 100MB.`;
+                        } else if (response.status === 422) {
+                            errorMessage = `Validação falhou para ${file.name}`;
+                        } else if (response.status === 500) {
+                            errorMessage = `Erro no servidor ao processar ${file.name}`;
+                        }
+
+                        allErrors.push({ filename: file.name, error: errorMessage });
+                        errorCount++;
+                        continue;
                     }
-                }, 200);
 
-                const response = await fetch('/joana/upload', {
-                    method: 'POST',
-                    headers: {
-                        'X-CSRF-TOKEN': csrfToken
-                    },
-                    body: formData
-                });
+                    const result = await response.json();
 
-                clearInterval(progressInterval);
-                updateProgress(90, 'Processando resposta...', 0, totalFiles);
-
-                const result = await response.json();
-
-                if (result.success) {
-                    updateProgress(100, 'Upload concluído!', totalFiles, totalFiles);
-
-                    showNotification('success', 'Upload realizado!',
-                        `${result.message}`, 5000);
+                    if (result.success) {
+                        successCount++;
+                        if (result.files) {
+                            allUploadedFiles.push(...result.files);
+                        }
+                    } else {
+                        errorCount++;
+                        allErrors.push({
+                            filename: file.name,
+                            error: result.message || 'Erro desconhecido'
+                        });
+                    }
 
                     if (result.errors && result.errors.length > 0) {
-                        result.errors.forEach(error => {
-                            showNotification('error', 'Erro no arquivo',
-                                `${error.filename}: ${error.error}`, 8000);
-                        });
+                        allErrors.push(...result.errors);
+                        errorCount++;
                     }
 
-                    clearFiles();
-
-                    // Start polling for updates - with small delay to ensure DB records exist
-                    if (result.files) {
-                        result.files.forEach((file, index) => {
-                            // Stagger polling start to avoid simultaneous requests
-                            setTimeout(() => {
-                                pollImportStatus(file.import_log_id);
-                            }, 500 + (index * 100)); // 500ms delay + 100ms per file
-                        });
-                    }
-
-                    hideProgress();
-                } else {
-                    updateProgress(0, 'Erro no upload');
-                    showNotification('error', 'Erro no upload',
-                        result.message || 'Erro ao enviar arquivos', 8000);
-                    hideProgress();
+                } catch (error) {
+                    console.error('Error uploading file:', file.name, error);
+                    errorCount++;
+                    allErrors.push({
+                        filename: file.name,
+                        error: 'Erro de conexão ao enviar arquivo'
+                    });
                 }
-            } catch (error) {
-                console.error('Error:', error);
-                updateProgress(0, 'Erro no upload');
-                showNotification('error', 'Erro de conexão',
-                    'Não foi possível enviar os arquivos. Verifique sua conexão e tente novamente.', 8000);
-                hideProgress();
             }
+
+            // Show final results
+            updateProgress(100, 'Upload concluído!', totalFiles, totalFiles);
+
+            if (successCount > 0) {
+                showNotification('success', 'Upload realizado!',
+                    `${successCount} de ${totalFiles} arquivo(s) enviado(s) com sucesso`, 5000);
+            }
+
+            if (allErrors.length > 0) {
+                allErrors.forEach(error => {
+                    showNotification('error', 'Erro no arquivo',
+                        `${error.filename}: ${error.error}`, 8000);
+                });
+            }
+
+            clearFiles();
+
+            // Start polling for updates
+            if (allUploadedFiles.length > 0) {
+                allUploadedFiles.forEach((file, index) => {
+                    setTimeout(() => {
+                        pollImportStatus(file.import_log_id);
+                    }, 500 + (index * 100));
+                });
+            }
+
+            setTimeout(() => {
+                hideProgress();
+            }, 2000);
         }
 
         async function refreshImports() {

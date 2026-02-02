@@ -28,23 +28,47 @@ class CsvImportService
     protected function loadTableColumns(): void
     {
         try {
-            // Get columns from Oracle table
-            $columns = DB::connection('oracle')
+            // Suppress ORA-28002 warning (password expiration notice) by using error suppression
+            // and catching warnings
+            $oldErrorLevel = error_reporting(E_ERROR | E_PARSE);
+
+            $columns = @DB::connection('oracle')
                 ->select("SELECT COLUMN_NAME FROM USER_TAB_COLUMNS WHERE TABLE_NAME = 'JOANA_TEMP' ORDER BY COLUMN_ID");
 
-            foreach ($columns as $column) {
-                $this->tableColumns[] = strtolower($column->column_name);
+            error_reporting($oldErrorLevel);
+
+            if ($columns && count($columns) > 0) {
+                foreach ($columns as $column) {
+                    $this->tableColumns[] = strtolower($column->column_name);
+                }
+
+                Log::info("Oracle table columns loaded", ['columns' => $this->tableColumns]);
+            } else {
+                throw new Exception("No columns found");
+            }
+        } catch (Exception $e) {
+            // Ignore ORA-28002 password expiration warnings completely
+            if (str_contains($e->getMessage(), 'ORA-28002')) {
+                // Still try to use hardcoded columns - warning doesn't prevent functionality
+                $this->tableColumns = [
+                    'uf', 'chave', 'numero', 'serie', 'emissao', 'cnpj_emissor',
+                    'ie_emissor', 'razao_social', 'tipo', 'valor', 'vl_bc',
+                    'vl_icms', 'vl_icms_st', 'vl_pis', 'vl_cofins', 'rejeitada', 'dtimportacao'
+                ];
+                Log::info("Using fallback columns (password warning ignored)");
+                return; // Exit early - no error to throw
             }
 
-            Log::info("Oracle table columns loaded", ['columns' => $this->tableColumns]);
-        } catch (Exception $e) {
             Log::error("Error loading table columns: " . $e->getMessage());
-            // Fallback to hardcoded columns if query fails
+
+            // Fallback to hardcoded columns for any other error
             $this->tableColumns = [
                 'uf', 'chave', 'numero', 'serie', 'emissao', 'cnpj_emissor',
                 'ie_emissor', 'razao_social', 'tipo', 'valor', 'vl_bc',
                 'vl_icms', 'vl_icms_st', 'vl_pis', 'vl_cofins', 'rejeitada', 'dtimportacao'
             ];
+
+            Log::info("Using fallback table columns", ['columns' => $this->tableColumns]);
         }
     }
 
@@ -179,6 +203,111 @@ class CsvImportService
             ];
 
         } catch (Exception $e) {
+            // Ignore ORA-28002 password expiration warning - it doesn't affect functionality
+            if (str_contains($e->getMessage(), 'ORA-28002')) {
+                Log::info("Password expiration warning ignored, continuing import");
+                // Don't update status to failed - continue normally
+                // The import will work fine despite the warning
+
+                // Just re-initialize table columns with fallback
+                $this->tableColumns = [
+                    'uf', 'chave', 'numero', 'serie', 'emissao', 'cnpj_emissor',
+                    'ie_emissor', 'razao_social', 'tipo', 'valor', 'vl_bc',
+                    'vl_icms', 'vl_icms_st', 'vl_pis', 'vl_cofins', 'rejeitada', 'dtimportacao'
+                ];
+
+                // Try to continue with the import using fallback columns
+                try {
+                    // Re-open file and continue
+                    $handle = fopen($filePath, 'r');
+                    if ($handle === false) {
+                        throw new Exception("Não foi possível abrir o arquivo");
+                    }
+
+                    fgets($handle); // Skip sep=;
+                    $header = fgetcsv($handle, 0, ';');
+
+                    if ($header === false) {
+                        throw new Exception("Arquivo CSV inválido");
+                    }
+
+                    $this->mapCsvHeader($header);
+
+                    if (empty($this->csvHeaderMap)) {
+                        throw new Exception("Nenhuma coluna do CSV corresponde às colunas da tabela Oracle");
+                    }
+
+                    $totalRows = 0;
+                    $importedRows = 0;
+                    $cnpjsProcessed = [];
+                    $rowsData = [];
+
+                    while (($row = fgetcsv($handle, 0, ';')) !== false) {
+                        $totalRows++;
+                        $data = $this->parseRowDynamic($row);
+
+                        if ($data) {
+                            $cnpjEmissor = $data['cnpj_emissor'] ?? null;
+
+                            if ($cnpjEmissor && !in_array($cnpjEmissor, $cnpjsProcessed)) {
+                                if (JoanaTemp::hasRecords($cnpjEmissor)) {
+                                    $deletedCount = JoanaTemp::deleteOldRecords($cnpjEmissor);
+                                    Log::info("Deleted {$deletedCount} old records for CNPJ: {$cnpjEmissor}");
+                                }
+                                $cnpjsProcessed[] = $cnpjEmissor;
+                            }
+
+                            $rowsData[] = $data;
+
+                            if (count($rowsData) >= 100) {
+                                $this->batchInsert($rowsData);
+                                $importedRows += count($rowsData);
+                                $rowsData = [];
+                            }
+                        }
+                    }
+
+                    if (!empty($rowsData)) {
+                        $this->batchInsert($rowsData);
+                        $importedRows += count($rowsData);
+                    }
+
+                    fclose($handle);
+
+                    $this->importLog->update([
+                        'status' => ImportLog::STATUS_COMPLETED,
+                        'total_rows' => $totalRows,
+                        'imported_rows' => $importedRows,
+                        'completed_at' => now(),
+                    ]);
+
+                    return [
+                        'success' => true,
+                        'message' => "Arquivo processado com sucesso",
+                        'total_rows' => $totalRows,
+                        'imported_rows' => $importedRows,
+                        'import_log_id' => $this->importLog->id,
+                    ];
+
+                } catch (Exception $continueError) {
+                    Log::error("Import error after password warning: " . $continueError->getMessage());
+
+                    if ($this->importLog) {
+                        $this->importLog->update([
+                            'status' => ImportLog::STATUS_FAILED,
+                            'error_message' => $continueError->getMessage(),
+                            'completed_at' => now(),
+                        ]);
+                    }
+
+                    return [
+                        'success' => false,
+                        'message' => "Erro ao processar arquivo: " . $continueError->getMessage(),
+                        'import_log_id' => $this->importLog ? $this->importLog->id : null,
+                    ];
+                }
+            }
+
             Log::error("Import error: " . $e->getMessage());
 
             if ($this->importLog) {
